@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-core:
+    name: Build Core - ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: synapse-core
+            asset_name: synapse-core-linux-amd64
+            archive_name: synapse-core-linux-amd64.tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact_name: synapse-core
+            asset_name: synapse-core-linux-arm64
+            archive_name: synapse-core-linux-arm64.tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: synapse-core
+            asset_name: synapse-core-darwin-amd64
+            archive_name: synapse-core-darwin-amd64.tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: synapse-core
+            asset_name: synapse-core-darwin-arm64
+            archive_name: synapse-core-darwin-arm64.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: synapse-core.exe
+            asset_name: synapse-core-windows-amd64
+            archive_name: synapse-core-windows-amd64.zip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+      - name: Build release binary
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release --target ${{ matrix.target }}
+      - name: Prepare archive (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} dist/
+          cp README.md dist/ || true
+          cp config.default.toml dist/config.toml.example || true
+          cd dist
+          tar -czf ../${{ matrix.archive_name }} *
+      - name: Prepare archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force
+          Copy-Item target/${{ matrix.target }}/release/${{ matrix.artifact_name }} dist/
+          Copy-Item README.md dist/ -ErrorAction SilentlyContinue
+          Copy-Item config.default.toml dist/config.toml.example -ErrorAction SilentlyContinue
+          Compress-Archive -Path dist/* -DestinationPath ${{ matrix.archive_name }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.archive_name }}
+
+  build-vscode:
+    name: Build VS Code Extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: plugins/vscode/package-lock.json
+      - run: cd plugins/vscode && npm ci
+      - run: cd plugins/vscode && npm run compile
+      - run: |
+          cd plugins/vscode
+          npm install -g @vscode/vsce
+          vsce package --out synapse-vscode-${{ github.ref_name }}.vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synapse-vscode-extension
+          path: plugins/vscode/synapse-vscode-${{ github.ref_name }}.vsix
+
+  create-release:
+    name: Create GitHub Release
+    needs: [build-core, build-vscode]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Get version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      - uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.get_version.outputs.VERSION }}
+          name: Release ${{ steps.get_version.outputs.VERSION }}
+          draft: false
+          prerelease: false
+          files: |
+            artifacts/synapse-core-linux-amd64/synapse-core-linux-amd64.tar.gz
+            artifacts/synapse-core-linux-arm64/synapse-core-linux-arm64.tar.gz
+            artifacts/synapse-core-darwin-amd64/synapse-core-darwin-amd64.tar.gz
+            artifacts/synapse-core-darwin-arm64/synapse-core-darwin-arm64.tar.gz
+            artifacts/synapse-core-windows-amd64/synapse-core-windows-amd64.zip
+            artifacts/synapse-vscode-extension/synapse-vscode-${{ steps.get_version.outputs.VERSION }}.vsix
